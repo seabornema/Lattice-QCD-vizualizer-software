@@ -8,7 +8,6 @@
 #include <thread>
 #include <complex>
 
-
 const int L= 16;
 const int Nt = 6;
 const std::complex<double> I(0.0, 1.0);
@@ -34,9 +33,25 @@ void init_paulis() {
 
 struct Links
 {
-    std::vector<Eigen::Matrix2cd> U;
+    std::vector<std::array<double,4>> Q;
 };
 
+std::array<double,4> prod(std::array<double,4> A,std::array<double,4> B){
+    double x0 = A[0]*B[0] - (A[1]*B[1] + A[2]*B[2] + A[3]*B[3]);
+    double a = A[0]*B[1] + B[0]*A[1] - (A[2]*B[3] - A[3]*B[2]);
+    double b = A[0]*B[2] + B[0]*A[2] - (A[3]*B[1] - A[1]*B[3]);
+    double c = A[0]*B[3] + B[0]*A[3] - (A[1]*B[2] - A[2]*B[1]);
+
+    return {x0,a,b,c};
+}
+
+std::array<double,4> scalardiv(std::array<double,4> A, double B){
+    return {A[0]/B,A[1]/B,A[2]/B,A[3]/B};
+}
+
+std::array<double,4> vec_sum(std::array<double,4> A, std::array<double,4> B) {
+    return {A[0]+B[0],A[1]+B[1],A[2]+B[2],A[3]+B[3]};
+}
 const int N_trials_per = 5000;
 int sweep_number = 0;
 std::vector<double> dist_holder(L/2,0);
@@ -49,34 +64,30 @@ sf::Font font;
 
 std::vector<std::vector<std::vector<std::vector<Links>>>> lattice(L, std::vector<std::vector<std::vector<Links>>>(L, std::vector<std::vector<Links>>(L, std::vector<Links>(Nt))));
 static std::mt19937 rng(std::random_device{}());
-#include <omp.h>
-
 
 double random_range(double a, double b) {
-    static thread_local std::mt19937 local_rng( std::random_device{}() ^ (std::hash<std::thread::id>()(std::this_thread::get_id())) );
-    std::uniform_real_distribution<double> dist(a,b);
-    return dist(local_rng);
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<double> dist(a, b);
+    return dist(rng);
 }
 double gauss_number() {
-    static thread_local std::mt19937 local_rng( std::random_device{}() ^ (std::hash<std::thread::id>()(std::this_thread::get_id())) );
-    static thread_local std::normal_distribution<double> nd(0.0,1.0);
-    return nd(local_rng);
+    static std::mt19937 rng(std::random_device{}());
+    static std::normal_distribution<double> nd(0.0, 1.0);
+    return nd(rng);
 }
-
 double x0_generator(double c,double beta) {
 	//looks good
-    bool found = false;
-    double lambda = 1;
-    double r = 10;
-    while(r*r > 1.0 - lambda) {
+    double rsq = 10;
+    double lambda2 = 1;
+    while(rsq > 1.0 - lambda2) {
         double r1 = random_range(0.0, 1.0);
         double r2 = random_range(0.0, 1.0);
         double r3 = random_range(0.0, 1.0);
 
-        lambda = -(1.0 / (2.0 * beta * c)) * (std::log(r1) + std::pow(std::cos(2.0 * M_PI * r2), 2) * std::log(r3));
-        r = random_range(0.0, 1.0);
+        lambda2 = -(1.0 / (2.0 * beta * c)) * (std::log(r1) + std::pow(std::cos(2.0 * M_PI * r2), 2) * std::log(r3));
+        rsq = std::pow(random_range(0.0, 1.0),2);
     }
-    return 1-2*lambda;
+    return 1-2*lambda2;
 }
 std::array<double,4> xvec_generator(double x0){
 	//looks good
@@ -87,15 +98,18 @@ std::array<double,4> xvec_generator(double x0){
         double norm = ((a*a) + (b*b) + (c*c));
 
         if(norm <= 1.0) {
-            double cool_const = (std::sqrt(1-(x0*x0)))/norm;
+            double cool_const = (std::sqrt((1-(x0*x0))/norm));
             return {x0,cool_const*a,cool_const*b,cool_const*c};
         }
-
     }
 }
 
-std::complex<double> det(Eigen::Matrix2cd inpu) {
-    return inpu.determinant();
+std::array<double,4> dagger(std::array<double,4> A){
+    return {A[0],-A[1],-A[2],-A[3]};
+}
+
+double det(std::array<double,4> inpu) {
+    return ((inpu[0]*inpu[0])+(inpu[1]*inpu[1])+(inpu[2]*inpu[2])+(inpu[3]*inpu[3]));
 }
 
 
@@ -104,16 +118,13 @@ Eigen::Matrix2cd SU2_constructor(const std::array<double,4>& xvec){
     return xvec[0]*Eigen::Matrix2cd::Identity() + xvec[1]*I*sigma_x + xvec[2]*I*sigma_y + xvec[3]*I*sigma_z;
 }
 
-Eigen::Matrix2cd gauge_link(const std::array<int,4>& position,int direction, std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice){
-    return lattice[position[0]][position[1]][position[2]][position[3]].U[direction];
-}
 
-Eigen::Matrix2cd staples(const std::array<int,4>& position,const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int mu){
+std::array<double,4> staples(const std::array<int,4>& position,const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int mu){
     int x = position[0];
     int y = position[1];
     int z = position[2];
     int t = position[3];
-    Eigen::Matrix2cd sum = Eigen::Matrix2cd::Zero();
+    std::array<double,4> sum = {0.0,0.0,0.0,0.0};
     std::array<int,4> U_direction = {0,0,0,0};
     U_direction[mu] = 1;
     for(int j = 0; j < 4; j ++){
@@ -126,16 +137,18 @@ Eigen::Matrix2cd staples(const std::array<int,4>& position,const std::vector<std
                 std::array<int,4> V_direction = {0,0,0,0};
                 V_direction[j] = 1;
                 
-                Eigen::Matrix2cd U1 = lattice[tmod(x+U_direction[0],L)][tmod(y+U_direction[1],L)][tmod(z+U_direction[2],L)][tmod(t+U_direction[3],Nt)].U[j];
-                Eigen::Matrix2cd U2 = lattice[tmod(x+V_direction[0],L)][tmod(y+V_direction[1],L)][tmod(z+V_direction[2],L)][tmod(t+V_direction[3],Nt)].U[mu].adjoint();
-                Eigen::Matrix2cd U3 = lattice[x][y][z][t].U[j].adjoint();
+                std::array<double,4> U1 = lattice[tmod(x+U_direction[0],L)][tmod(y+U_direction[1],L)][tmod(z+U_direction[2],L)][tmod(t+U_direction[3],Nt)].Q[j];
+                std::array<double,4> U2 = dagger(lattice[tmod(x+V_direction[0],L)][tmod(y+V_direction[1],L)][tmod(z+V_direction[2],L)][tmod(t+V_direction[3],Nt)].Q[mu]);
+                std::array<double,4> U3 = dagger(lattice[x][y][z][t].Q[j]);
                
-                Eigen::Matrix2cd U4 = lattice[tmod(x+U_direction[0]-V_direction[0],L)][tmod(y+U_direction[1]-V_direction[1],L)][tmod(z+U_direction[2]-V_direction[2],L)][tmod(t+U_direction[3]-V_direction[3],Nt)].U[j].adjoint();
-                Eigen::Matrix2cd U5 = lattice[tmod(x-V_direction[0],L)][tmod(y-V_direction[1],L)][tmod(z-V_direction[2],L)][tmod(t-V_direction[3],Nt)].U[mu].adjoint();
-                Eigen::Matrix2cd U6 = lattice[tmod(x-V_direction[0],L)][tmod(y-V_direction[1],L)][tmod(z-V_direction[2],L)][tmod(t-V_direction[3],Nt)].U[j];
+                std::array<double,4> U4 = dagger(lattice[tmod(x+U_direction[0]-V_direction[0],L)][tmod(y+U_direction[1]-V_direction[1],L)][tmod(z+U_direction[2]-V_direction[2],L)][tmod(t+U_direction[3]-V_direction[3],Nt)].Q[j]);
+                std::array<double,4> U5 = dagger(lattice[tmod(x-V_direction[0],L)][tmod(y-V_direction[1],L)][tmod(z-V_direction[2],L)][tmod(t-V_direction[3],Nt)].Q[mu]);
+                std::array<double,4> U6 = lattice[tmod(x-V_direction[0],L)][tmod(y-V_direction[1],L)][tmod(z-V_direction[2],L)][tmod(t-V_direction[3],Nt)].Q[j];
 
 
-                sum += ((U1*U2*U3) + (U4*U5*U6));
+auto term1 = prod(prod(U1, U2), U3);
+auto term2 = prod(prod(U4, U5), U6);
+sum = vec_sum(sum, vec_sum(term1, term2));
 
         }
     }
@@ -144,15 +157,29 @@ Eigen::Matrix2cd staples(const std::array<int,4>& position,const std::vector<std
 
 
 
-
 double jackKnife(const std::vector<double>& data) {
     int N = data.size();
-    double sum = std::accumulate(data.begin(), data.end(), 0.0);
-    std::vector<double> jk_means(N);
+    double full_sum = std::accumulate(data.begin(), data.end(), 0.0);
+
+    std::vector<double> jk(N);
+    jk.reserve(N);
+
+    // compute jackknife samples
     for (int i = 0; i < N; i++) {
-        jk_means[i] = (sum - data[i]) / (N - 1);
+        jk[i] = (full_sum - data[i]) / (N - 1);
     }
-    return std::accumulate(jk_means.begin(), jk_means.end(), 0.0) / N;
+
+    // jackknife mean
+    double mean = std::accumulate(jk.begin(), jk.end(), 0.0) / N;
+
+    // jackknife error
+    double accum = 0.0;
+    for (int i = 0; i < N; i++) {
+        double diff = jk[i] - mean;
+        accum += diff * diff;
+    }
+
+    return mean;
 }
 
 void cold_start(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice)
@@ -162,9 +189,9 @@ void cold_start(std::vector<std::vector<std::vector<std::vector<Links>>>>& latti
             for (int z = 0; z < L; ++z){
                 for (int t = 0; t < Nt; ++t)
                 {
-                    lattice[x][y][z][t].U.resize(4); 
+                     lattice[x][y][z][t].Q.resize(4); 
                     for (int mu = 0; mu < 4; ++mu){
-                        lattice[x][y][z][t].U[mu] = Eigen::Matrix2cd::Identity();
+                        lattice[x][y][z][t].Q[mu] = {1.0,0.0,0.0,0.0};
                     }
                 }
             }      
@@ -174,15 +201,14 @@ void cold_start(std::vector<std::vector<std::vector<std::vector<Links>>>>& latti
 }
 
 void heatbath_evolve_single(const std::array<int,4>& position,std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int direction,double beta){
-    Eigen::Matrix2cd staps = staples(position,lattice,direction);
-    double cval = std::sqrt(std::real(det(staps)));
+    std::array<double,4> staps = staples(position,lattice,direction);
+    double cval = std::sqrt((det(staps)));
    
     std::array<double,4> temp_guy = xvec_generator(x0_generator(cval,beta));
-    Eigen::Matrix2cd X = SU2_constructor(temp_guy);
    
-    Eigen::Matrix2cd Ut = (X* staps.adjoint())/cval;
+    std::array<double,4> Ut = scalardiv(prod(temp_guy,dagger(staps)),cval);
 
-    lattice[position[0]][position[1]][position[2]][position[3]].U[direction] = Ut/(std::sqrt(det(Ut)));    
+    lattice[position[0]][position[1]][position[2]][position[3]].Q[direction] = scalardiv(Ut,(std::sqrt(det(Ut))));    
 }
 
 void full_sweep(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int n,double beta){
@@ -202,35 +228,57 @@ void full_sweep(std::vector<std::vector<std::vector<std::vector<Links>>>>& latti
 
 }
 
-std::vector<std::vector<std::vector<std::complex<long>>>> Polyakov_loop(const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
-    
-    std::vector<std::vector<std::vector<std::complex<long>>>> temp(L, std::vector<std::vector<std::complex<long>>>(L, std::vector<std::complex<long>>(L, std::complex<long>(0.0, 0.0))));
 
-    #pragma omp parallel for
+std::vector<std::vector<std::vector<double>>> Polyakov_loop(const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
+    
+    std::vector<std::vector<std::vector<double>>> temp(L, std::vector<std::vector<double>>(L, std::vector<double>(L,0.0)));
     for (int i = 0; i < L * L * L; i++) {
         int x = i % L;
         int y = (i / L) % L;
         int z = (i / (L * L)) % L;
-        Eigen::Matrix2cd starter = lattice[x][y][z][0].U[3];
+        std::array<double,4> starter = lattice[x][y][z][0].Q[3];
         for (int t = 1; t < Nt; t++) {
-            starter = starter * lattice[x][y][z][t].U[3];
-            
+            starter = prod(starter,lattice[x][y][z][t].Q[3]);
         }
     
-        temp[x][y][z] = 0.5*starter.trace().real();
+        temp[x][y][z] = starter[0];
     }
 
     return temp;
 }
 
+/*
+
+void write_matrix_to_file(
+    const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice)
+{
+    auto temp = topological_charge(lattice); // L × L × L matrix of double
+
+    std::ofstream file("data/tst.dat", std::ios::binary);
+    if (!file) {
+        std::cerr << "ERROR: cannot open file\n";
+        return;
+    }
+
+    size_t L = temp.size();
+    file.write(reinterpret_cast<const char*>(&L), sizeof(size_t));
+
+    // Write data
+    for (size_t i = 0; i < L; i++)
+        for (size_t j = 0; j < L; j++)
+            file.write(reinterpret_cast<const char*>(temp[i][j].data()),
+                       temp[i][j].size() * sizeof(double));
+
+    file.close();
+}
+*/
 
 
-
-std::vector<long> potential_generator(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
+std::vector<double> potential_generator(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
     int halfL = L / 2;
-    std::vector<long> PP(halfL, 0.0);
-    std::vector<long> num(halfL, 0.0);
-    std::vector<std::vector<std::vector<std::complex<long>>>> ploops = Polyakov_loop(lattice);
+    std::vector<double> PP(halfL, 0.0);
+    std::vector<double> num(halfL, 0.0);
+    std::vector<std::vector<std::vector<double>>> ploops = Polyakov_loop(lattice);
     
     for (int i = 0; i < halfL; i++) {
         for (int j = 0; j < halfL; j++) {
@@ -240,30 +288,24 @@ std::vector<long> potential_generator(std::vector<std::vector<std::vector<std::v
                     int jp = (j + r) % L;
                     int kp = (k + r) % L;
                     
-                    std::complex<long> P0 = ploops[i][j][k];
+                    double P0 = ploops[i][j][k];
                
-                    PP[r] += (P0*(std::conj(ploops[ip][j][k])) +P0*(std::conj(ploops[i][jp][k])) +P0*(std::conj(ploops[i][j][kp]))).real();
+                    PP[r] += (P0*((ploops[ip][j][k])) +P0*((ploops[i][jp][k])) +P0*((ploops[i][j][kp])));
                     num[r] += 3.0;  
                 }
             }
         }
         
     }
-    for (int r = 0; r < halfL; r++) {
-        if (num[r] != 0.0) {
-            PP[r] /= num[r];
-        }
-        dist_holder[r] = r;
-        
-    }
 
-    return PP;
+    // after the loops
+for (int r = 0; r < halfL; ++r) {
+    if (num[r] > 0.0) PP[r] /= num[r];
+    else PP[r] = 0.0;
 }
+return PP;
 
-
-
-
-
+}
 
 
 
@@ -274,8 +316,8 @@ std::vector<double> potential_holder_2(L/2,0.0);
 
 int main(){
    font.loadFromFile("/home/seaborne/Desktop/C++/W95FA.ttf");
- 
     init_paulis();
+for (int r = 0; r < L/2; ++r) dist_holder[r] = static_cast<double>(r);
 
     
 
@@ -287,20 +329,18 @@ int main(){
     std::cout << "cold start done" << std::endl;
     
      full_sweep(lattice,500,beta);
+   // write_matrix_to_file(lattice);
 
+   
     for(int i =0; i < N_trials_per; i++) {
-        std::vector<long> holder = potential_generator(lattice);
+        std::vector<double> holder = potential_generator(lattice);
         for(int j = 0;j < L/2; j ++){
-        if(holder[j] < 1e-24){
-            polyakov_holder[j][i] = 0;
-        }else{  
-        polyakov_holder[j][i] = -1*std::log(holder[j]);
-        }
+        polyakov_holder[j][i] = (holder[j]);
         }
         full_sweep(lattice,1,beta);
     }
         for(int j = 0;j < L/2; j ++){
-            potential_holder[j] = (jackKnife(polyakov_holder[j]));
+            potential_holder[j] =-1*std::log(jackKnife(polyakov_holder[j]));
         }
 
 for (auto& row : polyakov_holder)
@@ -308,7 +348,7 @@ for (auto& row : polyakov_holder)
 
     
     std::cout << "initializing" << std::endl;
-    beta = 2.0;
+    beta = 2.2;
     cold_start(lattice);
     
 
@@ -321,16 +361,14 @@ for (auto& row : polyakov_holder)
 
 
     for(int i =0; i < N_trials_per; i++) {
-        std::vector<long> holder = potential_generator(lattice);
+        std::vector<double> holder = potential_generator(lattice);
         for(int j = 0;j < L/2; j ++){
-       
-        polyakov_holder[j][i] = -1*std::log(holder[j]);
-        
+        polyakov_holder[j][i] = (holder[j]);
         }
         full_sweep(lattice,1,beta);
     }
         for(int j = 0;j < L/2; j ++){
-            potential_holder_2[j] = (jackKnife(polyakov_holder[j]));
+            potential_holder_2[j] = -1*std::log(jackKnife(polyakov_holder[j]));
         }
 
 
@@ -381,7 +419,6 @@ window2.draw(myline2);
     std::cout<< "distance:"<<dist_holder[i] << std::endl;
 
     }
-
 
     return 0;
 
