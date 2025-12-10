@@ -9,7 +9,7 @@
 #include <complex>
 
 const int L= 16;
-const int Nt = 6;
+const int Nt = 8;
 const std::complex<double> I(0.0, 1.0);
 
 
@@ -119,6 +119,8 @@ Eigen::Matrix2cd SU2_constructor(const std::array<double,4>& xvec){
 }
 
 
+
+
 std::array<double,4> staples(const std::array<int,4>& position,const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int mu){
     int x = position[0];
     int y = position[1];
@@ -155,6 +157,54 @@ sum = vec_sum(sum, vec_sum(term1, term2));
     return sum;
 }
 
+std::array<double,4> sigma_matrix(const std::array<double,4>& staple)
+{
+    double det_h = (det(staple));
+    double norm = std::sqrt(det_h);
+
+    std::array<double,4> Sigma =scalardiv(staple,norm);
+
+    return Sigma;
+}
+void action_minimizing(const std::array<int,4>& position,std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice,int direction){
+       lattice[position[0]][position[1]][position[2]][position[3]].Q[direction] = sigma_matrix(staples(position,lattice,direction));
+}
+void action_minimizing_sweep(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
+        for(int i = 0; i < L*L*L*Nt*4; i++){
+            int dir = i % 4;
+            int x = (i / 4) % L;
+            int y = (i / (4*L)) % L;
+            int z = (i / (4*L*L)) % L;
+            int t = (i / (4*L*L*L)) % Nt;
+            action_minimizing({x,y,z,t}, lattice, dir);
+        }
+}
+double action_single(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice, int x,int y,int z,int t){
+    double sum =0;
+    
+    for(int mu = 0; mu < 4; mu ++){
+        std::array<int,4> mu_d = {0,0,0,0};
+        mu_d[mu]= 1;
+        for(int nu =0; nu<mu;nu++){
+              std::array<int,4> nu_d = {0,0,0,0};
+              nu_d[nu]= 1;
+            sum +=  prod(prod(lattice[x][y][z][t].Q[mu],lattice[tmod(x+mu_d[0],L)][tmod(y+mu_d[1],L)][tmod(z+mu_d[2],L)][tmod(t+mu_d[3],Nt)].Q[nu]),prod(dagger(lattice[tmod(x+nu_d[0],L)][tmod(y+nu_d[1],L)][tmod(z+nu_d[2],L)][tmod(t+nu_d[3],Nt)].Q[mu]),dagger(lattice[x][y][z][t].Q[nu])))[0];
+        }
+    }
+    return sum;
+}
+double sum_action(
+    std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice)
+{
+    double sum = 0.0;
+    for (int t = 0; t < Nt; ++t)
+    for (int z = 0; z < L;  ++z)
+    for (int y = 0; y < L;  ++y)
+    for (int x = 0; x < L;  ++x)
+        sum += action_single(lattice, x, y, z, t);
+
+    return sum/(L*L*L*Nt);
+}
 
 
 double jackKnife(const std::vector<double>& data) {
@@ -164,19 +214,14 @@ double jackKnife(const std::vector<double>& data) {
     std::vector<double> jk(N);
     jk.reserve(N);
 
-    // compute jackknife samples
     for (int i = 0; i < N; i++) {
         jk[i] = (full_sum - data[i]) / (N - 1);
     }
 
-    // jackknife mean
     double mean = std::accumulate(jk.begin(), jk.end(), 0.0) / N;
 
-    // jackknife error
-    double accum = 0.0;
     for (int i = 0; i < N; i++) {
         double diff = jk[i] - mean;
-        accum += diff * diff;
     }
 
     return mean;
@@ -247,32 +292,6 @@ std::vector<std::vector<std::vector<double>>> Polyakov_loop(const std::vector<st
     return temp;
 }
 
-/*
-
-void write_matrix_to_file(
-    const std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice)
-{
-    auto temp = topological_charge(lattice); // L × L × L matrix of double
-
-    std::ofstream file("data/tst.dat", std::ios::binary);
-    if (!file) {
-        std::cerr << "ERROR: cannot open file\n";
-        return;
-    }
-
-    size_t L = temp.size();
-    file.write(reinterpret_cast<const char*>(&L), sizeof(size_t));
-
-    // Write data
-    for (size_t i = 0; i < L; i++)
-        for (size_t j = 0; j < L; j++)
-            file.write(reinterpret_cast<const char*>(temp[i][j].data()),
-                       temp[i][j].size() * sizeof(double));
-
-    file.close();
-}
-*/
-
 
 std::vector<double> potential_generator(std::vector<std::vector<std::vector<std::vector<Links>>>>& lattice) {
     int halfL = L / 2;
@@ -298,7 +317,6 @@ std::vector<double> potential_generator(std::vector<std::vector<std::vector<std:
         
     }
 
-    // after the loops
 for (int r = 0; r < halfL; ++r) {
     if (num[r] > 0.0) PP[r] /= num[r];
     else PP[r] = 0.0;
@@ -322,15 +340,12 @@ for (int r = 0; r < L/2; ++r) dist_holder[r] = static_cast<double>(r);
     
 
     std::cout << "initializing" << std::endl;
-    beta = 2.7;
     cold_start(lattice);
     
 
     std::cout << "cold start done" << std::endl;
     
-     full_sweep(lattice,500,beta);
-   // write_matrix_to_file(lattice);
-
+/*
    
     for(int i =0; i < N_trials_per; i++) {
         std::vector<double> holder = potential_generator(lattice);
@@ -371,9 +386,44 @@ for (auto& row : polyakov_holder)
             potential_holder_2[j] = -1*std::log(jackKnife(polyakov_holder[j]));
         }
 
-
-
-           Camera2D mycam = {0,-5,50,50};
+        for(int i =0; i < N_trials_per; i++) {
+        std::vector<double> holder = potential_generator(lattice);
+        for(int j = 0;j < L/2; j ++){
+        polyakov_holder[j][i] = (holder[j]);
+        }
+    }
+*/
+           Camera2D mycam = {10,-2,20,20};
+   std::vector<double> x;
+    std::vector<double> y;
+           /*
+std::vector<sf::VertexArray> lines_holder;
+    std::vector<double> gurbis;
+    std::vector<double> shmurbis;
+ 
+    double bmax= 100;
+    double binc =10;
+    double b0=10;
+    for(double b=b0;b<bmax; b+= binc){
+    beta = b;
+    full_sweep(lattice,500,beta);
+    std::vector<double> gurbis;
+    std::vector<double> shmurbis;
+    for(int i =0; i< 100; i++){
+    gurbis.push_back(i);
+    shmurbis.push_back(sum_action(lattice));
+    action_minimizing_sweep(lattice);
+    }
+ lines_holder.push_back(zuper_line(gurbis,shmurbis,sf::Color(255*(b/bmax),0,255*(1-(b/bmax)),255),mycam,window_size,true));
+}
+*/
+  full_sweep(lattice,1,beta);
+   beta =2.2;
+for(int i =0; i< 100; i++){
+    x.push_back(i);
+    y.push_back(sum_action(lattice));
+    full_sweep(lattice,1,beta);
+    }
 
 sf::RenderWindow window2(sf::VideoMode(window_size, window_size), "quark-antiquark potential");
     while (window2.isOpen()) {
@@ -386,9 +436,10 @@ sf::RenderWindow window2(sf::VideoMode(window_size, window_size), "quark-antiqua
     }
         mycam = zuper_keyboard_input(1,1.1,mycam);
 
+    sf::VertexArray myline = zuper_line(x,y,sf::Color(0,0,255,255),mycam,window_size,true);
     
-    sf::VertexArray myline = zuper_line(dist_holder,potential_holder,sf::Color(0,0,255,255),mycam,window_size,true);
-    sf::VertexArray myline2 = zuper_line(dist_holder,potential_holder_2,sf::Color(255,0,0,255),mycam,window_size,true);
+   //sf::VertexArray myline = zuper_line(dist_holder,potential_holder,sf::Color(0,0,255,255),mycam,window_size,true);
+    //sf::VertexArray myline2 = zuper_line(dist_holder,potential_holder_2,sf::Color(255,0,0,255),mycam,window_size,true);
     
 
     window2.clear(sf::Color::White);
@@ -405,12 +456,16 @@ sf::RenderWindow window2(sf::VideoMode(window_size, window_size), "quark-antiqua
 
    // window2.draw(zuper_x_axis(sf::Color::Black,mycam,window_size));
   //  window2.draw(zuper_y_axis(sf::Color::Black,mycam,window_size));
-    window2.draw(myline);
-window2.draw(myline2);
+ /*   
+    for(sf::VertexArray& v : lines_holder){
+        window2.draw(v);
+    }
+ */
+   window2.draw(myline);
+//window2.draw(myline2);
 
     window2.display();
 }
-
 
 
 
